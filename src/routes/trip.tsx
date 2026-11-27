@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { changeDue } from "@/lib/ads";
 import { startAlarmLoop, stopAlarmLoop, testAlarm } from "@/lib/alarm";
+import { keepAliveActive, startKeepAlive, stopKeepAlive } from "@/lib/keepalive";
 import { acquireWakeLock, releaseWakeLock, wakeLockSupported } from "@/lib/wake-lock";
 import { geocode, getCached, MIN_QUERY_LENGTH, type GeoResult } from "@/lib/geocode";
 import { clearTrip, evaluatePosition, loadTrip, saveTrip, type TripEvent } from "@/lib/trip-state";
@@ -54,6 +55,10 @@ function TripPage() {
   const [wakeOn, setWakeOn] = useState(true);
   const [wakeHeld, setWakeHeld] = useState(false);
   const [resumed, setResumed] = useState(false);
+  const [bgOn, setBgOn] = useState(false);
+  const [lastFixAt, setLastFixAt] = useState<number | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => { if (!watching) return; const i = setInterval(() => setTick((x) => x + 1), 15000); return () => clearInterval(i); }, [watching]);
   // Detected after mount: reading `navigator` while rendering differs between server and phone (hydration error).
   const [wakeSupported, setWakeSupported] = useState(true);
   useEffect(() => { setWakeSupported(wakeLockSupported()); }, []);
@@ -102,6 +107,7 @@ function TripPage() {
     const t = trip.current;
     if (!t) return;
     lastFix.current = Date.now();
+    setLastFixAt(lastFix.current);
     const r = evaluatePosition(here, t.dest, fired.current, PLACES, toArabicDigits);
     if (r.km != null) setKm(r.km);
     setNearby(r.nearby);
@@ -118,6 +124,7 @@ function TripPage() {
     if (watchId.current != null) navigator.geolocation?.clearWatch(watchId.current);
     watchId.current = null; setWatching(false);
     void releaseWakeLock(); setWakeHeld(false);
+    stopKeepAlive(); setBgOn(false);
     if (forget) { clearTrip(); trip.current = null; }
   };
   // Leaving the page keeps the saved trip (so it resumes); only the live watcher is released.
@@ -153,6 +160,8 @@ function TripPage() {
     fired.current = new Set();
     setResumed(false);
     begin(dest, Date.now(), wakeOn);
+    // From the tap: audio is only allowed after a gesture. Best effort, see lib/keepalive.ts.
+    void startKeepAlive(dest.name, () => setBgOn(false)).then(setBgOn);
   };
 
   // Reopen the app: pick the saved trip up again instead of silently forgetting it.
@@ -174,6 +183,7 @@ function TripPage() {
     const onVisible = () => {
       if (document.visibilityState !== "visible" || !trip.current) return;
       if (wakeOn) void acquireWakeLock().then(setWakeHeld);
+      setBgOn(keepAliveActive());
       const gap = Date.now() - lastFix.current;
       if (gap > 90_000) toast.warning("المتابعة كانت واقفة حوالي " + toArabicDigits(String(Math.round(gap / 60000))) + " دقيقة لأن الشاشة كانت مقفولة. بنفحص مكانك دلوقتي.", { duration: 9000 });
       navigator.geolocation?.getCurrentPosition((p) => handleFix({ lat: p.coords.latitude, lng: p.coords.longitude }), () => {}, { enableHighAccuracy: true, timeout: 20000 });
@@ -282,6 +292,12 @@ function TripPage() {
           </p>
         )}
         <p className="text-xs text-muted-foreground">هننبهك قبل الوصول بـ ٣ كم وعند الوصول.</p>
+        {watching && (
+          <p className="rounded-2xl bg-road-soft p-3 text-xs text-foreground" data-tick={tick}>
+            آخر تحديث للموقع: {lastFixAt ? "من " + toArabicDigits(String(Math.max(0, Math.round((Date.now() - lastFixAt) / 1000)))) + " ثانية" : "لسه مجاش"}.
+            {" "}وضع التشغيل مع قفل الشاشة (تجريبي): {bgOn ? "شغّال، هيظهر إشعار «المتابعة شغالة». لو ظهر إشعار صوت، سيبه." : "مش شغّال على الجهاز ده، سيب الشاشة مفتوحة."}
+          </p>
+        )}
         {resumed && watching && <p className="rounded-2xl bg-road-soft p-3 text-xs font-bold text-road">كملنا متابعة رحلتك المحفوظة لـ {dest.name}. المتابعة مش بتتلغي لو قفلت التطبيق وفتحته تاني.</p>}
         <button type="button" onClick={() => void toggleWake()} className="flex w-full items-center justify-between rounded-2xl border border-border p-3 text-sm">
           <span className="flex items-center gap-2 font-bold"><ScreenShare className="size-4" /> إبقاء الشاشة مفتوحة أثناء الرحلة</span>
